@@ -14,15 +14,18 @@
   "license": "ISC",
   "dependencies": {
     "@apollo/client": "^3.9.7",
+    "axios": "^1.6.8",
+    "bignumber.js": "9.1.1",
     "cors": "^2.8.5",
     "cross-fetch": "^4.0.0",
     "dotenv": "^16.4.5",
+    "ethers": "5.7.2",
     "express": "^4.18.3",
     "glob": "8.0.3",
     "graphql": "^16.8.1",
     "graphql-request": "^6.1.0",
     "mongodb": "^6.5.0",
-    "mongoose": "^8.2.1",
+    "mongoose": "^8.2.3",
     "web3": "^4.6.0"
   },
   "devDependencies": {

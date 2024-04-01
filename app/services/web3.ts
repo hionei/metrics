@@ -2,6 +2,8 @@ import Web3 from "web3";
 import glob from "glob";
 import fs from "fs";
 import dotenv from "dotenv";
+import { ethers, BigNumber } from "ethers";
+
 dotenv.config();
 const RPC_URL = process.env.RPC_URL;
 
@@ -25,8 +27,8 @@ export const keepFiles = (limit: number, symbol: string) => {
   }
 };
 
-export const getWeb3 = () => {
-  const web3 = new Web3(RPC_URL);
+export const getWeb3 = (rpc_url: string) => {
+  const web3 = new Web3(rpc_url);
   return web3;
 };
 
@@ -61,6 +63,11 @@ export function getAbi(abiPath: string) {
   return abi;
 }
 
+export const getProvider = (RPC_URL) => {
+  const provider = new ethers.providers.JsonRpcProvider(RPC_URL);
+  return provider;
+};
+
 export async function getWeb3Contract(
   web3: any,
   address: string,
@@ -70,9 +77,22 @@ export async function getWeb3Contract(
   return new web3.eth.Contract(getAbi(`artifacts/${abiPath}`), address);
 }
 
+export async function getContract(
+  provider: any,
+  address: string,
+  name: string
+) {
+  let abiPath = await relativeContractABIPathForContractName(name);
+  return new ethers.Contract(address, getAbi(`artifacts/${abiPath}`), provider);
+}
+
 export function getWeb3Wallet(web3: any, privateKey: string) {
   if (privateKey.indexOf("0x") != 0) {
     privateKey = "0x" + privateKey;
   }
   return web3.eth.accounts.privateKeyToAccount(privateKey);
+}
+
+export function bigNumberToMillis(num: number) {
+  return BigNumber.from(num * 1000);
 }
