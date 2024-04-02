@@ -1,4 +1,5 @@
 export const RPC_URLS = ["https://songbird.solidifi.app/ext/C/rpc", "http://95.217.192.225:9650/ext/C/rpc"];
+export const GRAPHQL_URL = "http://173.249.53.155/";
 
 export const FLR_SYMBOLS = [
   "FLR",

@@ -1,11 +1,9 @@
-import { GraphQLClient } from "graphql-request";
 import { Request, Response, query } from "express";
 import { getContract, getProvider, getWeb3, getWeb3Contract, bigNumberToMillis } from "../services/web3";
-import { writeFileSync } from "fs";
 import dotenv from "dotenv";
 import { currentUnixTime, weiToEther } from "../utils/helpers";
 import axios from "axios";
-import { RPC_URLS, SGB_SYMBOLS } from "../config";
+import { RPC_URLS, SGB_SYMBOLS, GRAPHQL_URL } from "../config";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
 dotenv.config();
@@ -27,44 +25,6 @@ const prevSchema = new Schema({
 const mongoDB = "mongodb://localhost:27017/songbirdData";
 
 // Compile model from schema
-
-const GET_DELEGATORS = `
-query {
-    delegates(
-      first: 10
-      orderBy: AMOUNT_DESC
-      filter: {
-        network: { equalTo: "songbird" }
-        delegatee: { equalTo: "${process.env.PROVIDER_ADDRESS}" }
-      }
-    ) {
-      nodes {
-        id
-        network
-        owner
-        delegatee
-        amount
-      }
-      totalCount
-      pageInfo {
-        hasNextPage
-        hasPreviousPage
-        startCursor
-        endCursor
-      }
-    }
-  }
-`;
-
-type Top10Info = {
-  id: string;
-  owner: string;
-  delegatee: string;
-  network: string;
-  amount: string;
-  lockedVP: string;
-  usualReward: string;
-};
 
 type ProviderInfo = {
   chain_id: number;
@@ -121,6 +81,7 @@ class SongbirdController {
   lockedVotePowerList: Object = {};
   currentEpochRewardList: Object = {};
   totalEpochRewardList: Object = {};
+  delegatorsInfoList: Object = {};
 
   currentRewardRateList: Object = {};
   prevRewardRateList: Object = {};
@@ -323,9 +284,8 @@ class SongbirdController {
     try {
       const conn = mongoose.createConnection(mongoDB);
       const prevModel = conn.model("prevData", prevSchema);
-      console.log(this.currentRewardEpochID - 1);
 
-      const prevData = await prevModel.find({ epochID: String(this.currentRewardEpochID - 1) });
+      const prevData = await prevModel.find({ epochID: String(Number(this.currentRewardEpochID) - 1) });
       for (let addr in this.addrWhitelistInfo) {
         const prevTotalReward = Number(this.web3.utils.fromWei(prevData[0].prevTotalReward[addr], "ether")).toFixed();
         const prevEpochReward = Number(this.web3.utils.fromWei(prevData[0].prevEpochReward[addr], "ether")).toFixed();
@@ -335,7 +295,9 @@ class SongbirdController {
           ((Number(prevTotalReward) - Number(prevEpochReward)) / Number(votePower)) * 100
         ).toFixed(4);
       }
-    } catch (err) {}
+    } catch (err) {
+      console.log(err.message);
+    }
   };
 
   // ======================Prev epoch Reward and total reward ===========================
@@ -478,10 +440,6 @@ class SongbirdController {
     try {
       this.currentRewardEpochID = await this.ftsoManagerWeb3Contract.methods.getCurrentRewardEpoch().call();
     } catch (err) {}
-
-    setTimeout(async () => {
-      this.getEpochID();
-    }, 5000);
   };
 
   getTotalVotePower = async () => {
@@ -538,11 +496,14 @@ class SongbirdController {
     );
 
     let providersInfo = [];
+    let id = 0;
     for (let addr in this.addrWhitelistInfo) {
+      id++;
       let found = false;
-      providersRawData.data.providers.forEach((provider) => {
+      providersRawData.data.providers.forEach((provider, index) => {
         if (String(provider.address).toLowerCase() == addr.toLowerCase() && provider.chainId == 19) {
           providersInfo.push({
+            id: id,
             name: provider.name,
             desc: provider.description,
             url: provider.url,
@@ -567,6 +528,7 @@ class SongbirdController {
 
       if (!found) {
         providersInfo.push({
+          id: id,
           name: "",
           desc: "",
           url: "",
