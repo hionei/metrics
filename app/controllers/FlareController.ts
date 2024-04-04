@@ -1,11 +1,9 @@
-import { GraphQLClient } from "graphql-request";
 import { Request, Response, query } from "express";
 import { getContract, getProvider, getWeb3, getWeb3Contract, bigNumberToMillis } from "../services/web3";
-import { writeFileSync } from "fs";
 import dotenv from "dotenv";
 import { currentUnixTime, weiToEther } from "../utils/helpers";
 import axios from "axios";
-import { FLR_SYMBOLS, RPC_URLS } from "../config";
+import { RPC_URLS, FLR_SYMBOLS, GRAPHQL_URL } from "../config";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
 dotenv.config();
@@ -17,47 +15,16 @@ const addrSchema = new Schema({
   data: Object,
 });
 
+const prevSchema = new Schema({
+  epochID: String,
+  prevEpochReward: Object,
+  prevTotalReward: Object,
+  votePower: Object,
+});
+
 const mongoDB = "mongodb://localhost:27017/flareData";
 
 // Compile model from schema
-
-const GET_DELEGATORS = `
-query {
-    delegates(
-      first: 10
-      orderBy: AMOUNT_DESC
-      filter: {
-        network: { equalTo: "songbird" }
-        delegatee: { equalTo: "${process.env.PROVIDER_ADDRESS}" }
-      }
-    ) {
-      nodes {
-        id
-        network
-        owner
-        delegatee
-        amount
-      }
-      totalCount
-      pageInfo {
-        hasNextPage
-        hasPreviousPage
-        startCursor
-        endCursor
-      }
-    }
-  }
-`;
-
-type Top10Info = {
-  id: string;
-  owner: string;
-  delegatee: string;
-  network: string;
-  amount: string;
-  lockedVP: string;
-  usualReward: string;
-};
 
 type ProviderInfo = {
   chain_id: number;
@@ -114,6 +81,10 @@ class FlareController {
   lockedVotePowerList: Object = {};
   currentEpochRewardList: Object = {};
   totalEpochRewardList: Object = {};
+  delegatorsInfoList: Object = {};
+
+  currentRewardRateList: Object = {};
+  prevRewardRateList: Object = {};
 
   balances: Object = {};
   endsIn: number = 0;
@@ -137,78 +108,125 @@ class FlareController {
 
   constructor() {
     const init = async () => {
-      this.web3 = getWeb3(RPC_URL);
+      try {
+        this.web3 = getWeb3(RPC_URL);
 
-      this.priceSubmitterWeb3Contract = await getWeb3Contract(
-        this.web3,
-        process.env.SUBMITTER_CONTRACT_ADDRESS,
-        "PriceSubmitter"
-      );
+        if (this.web3) {
+          console.log("Web3 instance is created properly");
+        }
 
-      let ftsoManagerAddress = await this.priceSubmitterWeb3Contract.methods.getFtsoManager().call();
-      this.ftsoManagerWeb3Contract = await getWeb3Contract(this.web3, ftsoManagerAddress, "FtsoManager");
+        const result = await this.web3.eth.net.isListening();
 
-      const ftsoRewardManagerAddress = await this.ftsoManagerWeb3Contract.methods.rewardManager().call();
-      this.ftsoRewardManagerContract = await getWeb3Contract(this.web3, ftsoRewardManagerAddress, "FtsoRewardManager");
+        console.log("🎵 Web3 status", result);
 
-      const wnatContractAddress = await this.ftsoRewardManagerContract.methods.wNat().call();
-      this.wNatContract = await getWeb3Contract(this.web3, wnatContractAddress, "WNat");
+        this.priceSubmitterWeb3Contract = await getWeb3Contract(
+          this.web3,
+          process.env.SUBMITTER_CONTRACT_ADDRESS,
+          "PriceSubmitter"
+        );
 
-      const voterWhitelisterAddress = await this.priceSubmitterWeb3Contract.methods.getVoterWhitelister().call();
-      this.voterWhitelisterContract = await getWeb3Contract(this.web3, voterWhitelisterAddress, "VoterWhitelister");
+        let ftsoManagerAddress = await this.priceSubmitterWeb3Contract.methods.getFtsoManager().call();
+        this.ftsoManagerWeb3Contract = await getWeb3Contract(this.web3, ftsoManagerAddress, "FtsoManager");
+
+        const ftsoRewardManagerAddress = await this.ftsoManagerWeb3Contract.methods.rewardManager().call();
+        this.ftsoRewardManagerContract = await getWeb3Contract(this.web3, ftsoRewardManagerAddress, "FtsoRewardManager");
+
+        const wnatContractAddress = await this.ftsoRewardManagerContract.methods.wNat().call();
+        this.wNatContract = await getWeb3Contract(this.web3, wnatContractAddress, "WNat");
+
+        const voterWhitelisterAddress = await this.priceSubmitterWeb3Contract.methods.getVoterWhitelister().call();
+        this.voterWhitelisterContract = await getWeb3Contract(this.web3, voterWhitelisterAddress, "VoterWhitelister");
+
+        await this.setupListener();
+
+        console.log("🍁 Got all contract instances and setup listener 🍁");
+        await this.setupEndsIn();
+        console.log("setupEndsIn");
+
+        setTimeout(() => {
+          const roundExecution = async () => {
+            try {
+              console.log("🌼 Flare Started getting initial info 🌼");
+
+              await this.getWhitelistedAddresses();
+              console.log("1. got whitelisted addresses");
+
+              await this.getEpochID();
+              console.log("2. got epoch id");
+              this.initVariables();
+              console.log("3. init variables");
+
+              this.getPrevEpochRewardRate();
+              console.log("4. getPrevEpochRewardRate");
+
+              await this.setupDuration();
+              console.log("6. setupduration");
+
+              await this.getTotalVotePower();
+              console.log("7. getTotalVotePower");
+
+              await this.getSuccessRate();
+              console.log("8. getSuccessRate");
+
+              await this.getCurrentVotePowerList();
+              console.log("9. getCurrentVotePowerList");
+
+              await this.getLockedVotePowerList();
+              console.log("10. getLockedVotePowerList");
+
+              await this.getBalances();
+              console.log("11. getBalances");
+
+              await this.getCurrentEpochReward();
+              console.log("12. getCurrentEpochReward");
+
+              await this.getTotalEpochReward();
+              console.log("13. getTotalEpochReward");
+
+              this.getRewardRate();
+              console.log("14. getRewardRate");
+
+              await this.savePrevData();
+              console.log("15. Saved Prev Data");
+
+              await this.getFee();
+              console.log("16. getFee");
+
+              await this.getFTSOProvidersInfo();
+              console.log("👨‍🚀 ftso providers data is ready👨‍🚀");
+              roundExecution();
+            } catch (err) {
+              console.log(err.message);
+              console.log("🏹 👇restarting again 👇🏹");
+              await init();
+            }
+          };
+          roundExecution();
+        }, 1000);
+      } catch (err) {
+        console.log(err.message);
+        console.log("🏹 restarting again 🏹");
+
+        await init();
+      }
     };
 
     init();
-
-    setTimeout(() => {
-      const roundExecution = async () => {
-        await this.getWhitelistedAddresses();
-        console.log("==Started getting initial info==");
-        await this.getEpochID();
-        console.log("1. got epoch id");
-        await this.setupEndsIn();
-        console.log("2. setupEndsIn");
-
-        await this.setupDuration();
-        console.log("3. setupduration");
-
-        await this.getTotalVotePower();
-        console.log("4. getTotalVotePower");
-
-        await this.getSuccessRate();
-        console.log("5. getSuccessRate");
-
-        await this.getCurrentVotePowerList();
-        console.log("6. getCurrentVotePowerList");
-
-        await this.getLockedVotePowerList();
-        console.log("7. getLockedVotePowerList");
-
-        await this.getBalances();
-        console.log("8. getBalances");
-
-        await this.getCurrentEpochReward();
-        console.log("9. getCurrentEpochReward");
-
-        await this.getTotalEpochReward();
-        console.log("10. getTotalEpochReward");
-
-        // this.getPrevEpochReward();
-        await this.getPrevTotalEpochReward();
-        console.log("11. getPrevTotalEpochReward");
-
-        await this.getPrevLockedVotePowerList();
-        console.log("12. getPrevLockedVotePowerList");
-
-        await this.getFee();
-        console.log("13. getFee");
-
-        await this.getFTSOProvidersInfo();
-        roundExecution();
-      };
-      roundExecution();
-    }, 15000);
   }
+  initVariables = () => {
+    for (let addr in this.addrWhitelistInfo) {
+      this.prevRewardRateList[addr] = 0;
+      this.currentRewardRateList[addr] = 0;
+    }
+  };
+
+  enableAutoClaim = (req: Request, res: Response) => {
+    const { address } = req.body;
+  };
+
+  removeAutoClaim = (req: Request, res: Response) => {
+    const { address } = req.body;
+  };
 
   getBalances = async () => {
     for (let addr in this.addrWhitelistInfo) {
@@ -217,7 +235,7 @@ class FlareController {
         const ethBalance = this.web3.utils.fromWei(balance, "ether");
         this.balances[addr] = ethBalance;
       } catch (err) {
-        console.log(addr, "getBalances", err);
+        console.log(addr, "getBalances", err.message);
       }
     }
   };
@@ -247,9 +265,10 @@ class FlareController {
         const curEpochReward = await this.ftsoRewardManagerContract.methods
           .getStateOfRewards(addr, this.currentRewardEpochID)
           .call();
-        this.currentEpochRewardList[addr] = curEpochReward[1][0];
+        this.currentEpochRewardList[addr] = curEpochReward[1][0] ? curEpochReward[1][0].toString() : "0";
       } catch (err) {
-        console.log(addr, err);
+        this.currentEpochRewardList[addr] = "0";
+        console.log(addr, err.message);
       }
     }
   };
@@ -260,32 +279,52 @@ class FlareController {
         const totalEpochReward = await this.ftsoRewardManagerContract.methods
           .getDataProviderPerformanceInfo(this.currentRewardEpochID, addr)
           .call();
-        this.totalEpochRewardList[addr] = totalEpochReward[0];
+        this.totalEpochRewardList[addr] = totalEpochReward[0] ? totalEpochReward[0].toString() : "0";
       } catch (err) {
+        this.totalEpochRewardList[addr] = "0";
         console.log(addr, "getTotalEpochReward", err);
       }
     }
   };
 
+  getPrevEpochRewardRate = async () => {
+    try {
+      const conn = mongoose.createConnection(mongoDB);
+      const prevModel = conn.model("prevData", prevSchema);
+
+      const prevData = await prevModel.find({ epochID: String(Number(this.currentRewardEpochID) - 1) });
+      for (let addr in this.addrWhitelistInfo) {
+        const prevTotalReward = Number(this.web3.utils.fromWei(prevData[0].prevTotalReward[addr], "ether")).toFixed();
+        const prevEpochReward = Number(this.web3.utils.fromWei(prevData[0].prevEpochReward[addr], "ether")).toFixed();
+        const votePower = Number(this.web3.utils.fromWei(prevData[0].votePower[addr], "ether")).toFixed();
+
+        this.prevRewardRateList[addr] = Number(
+          ((Number(prevTotalReward) - Number(prevEpochReward)) / Number(votePower)) * 100
+        ).toFixed(4);
+      }
+    } catch (err) {
+      console.log(err.message);
+    }
+  };
+
   // ======================Prev epoch Reward and total reward ===========================
 
-  // getPrevEpochReward = async () => {
-  //   for (let addr in this.addrWhitelistInfo) {
-  //     const prevEpochReward = await this.ftsoRewardManagerContract.methods.getStateOfRewards(addr, Number(this.currentRewardEpochID) - 1).call();
-  //     this.prevEpochRewardList[addr] = prevEpochReward;
-  //   }
-  // };
+  savePrevData = async () => {
+    try {
+      const conn = mongoose.createConnection(mongoDB);
+      const prevModel = conn.model("prevData", prevSchema);
 
-  getPrevTotalEpochReward = async () => {
-    for (let addr in this.addrWhitelistInfo) {
-      try {
-        const totalEpochReward = await this.ftsoRewardManagerContract.methods
-          .getDataProviderPerformanceInfo(Number(this.currentRewardEpochID) - 1, addr)
-          .call();
-        this.prevTotalRewardList[addr] = totalEpochReward[0];
-      } catch (err) {
-        console.log(addr, "getPrevTotalEpochReward", err);
-      }
+      await prevModel.findOneAndUpdate(
+        { epochID: String(this.currentRewardEpochID) },
+        {
+          prevEpochReward: this.currentEpochRewardList,
+          prevTotalReward: this.totalEpochRewardList,
+          votePower: this.lockedVotePowerList,
+        },
+        { new: true, upsert: true }
+      );
+    } catch (err) {
+      console.log(err.message);
     }
   };
 
@@ -302,7 +341,7 @@ class FlareController {
         });
       }
     } catch (err) {
-      console.log("getWhitelistedAddresses", err);
+      console.log("getWhitelistedAddresses", err.message);
     }
   };
 
@@ -363,7 +402,7 @@ class FlareController {
     try {
       this.duration = await this.ftsoManagerWeb3Contract.methods.rewardEpochDurationSeconds().call();
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
     }
   };
 
@@ -385,12 +424,13 @@ class FlareController {
                   .call();
                 this.prevEpochRewardList[addr] = curEpochRewardforPrev[1];
               } catch (err) {
-                console.log(addr, err);
+                console.log(addr, err.message);
               }
             }
             stored = true;
           }
         }
+
         if (this.endsIn < 0) {
           clearInterval(interval);
           this.setupEndsIn();
@@ -398,7 +438,7 @@ class FlareController {
         this.endsIn--;
       }, 1000);
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
     }
   };
 
@@ -406,17 +446,14 @@ class FlareController {
     try {
       this.currentRewardEpochID = await this.ftsoManagerWeb3Contract.methods.getCurrentRewardEpoch().call();
     } catch (err) {}
-
-    setTimeout(async () => {
-      this.getEpochID();
-    }, 5000);
   };
 
   getTotalVotePower = async () => {
     try {
-      this.totalVotePower = await this.wNatContract.methods.totalVotePower().call();
+      const totalvp = await this.wNatContract.methods.totalVotePower().call();
+      this.totalVotePower = totalvp.toString();
     } catch (err) {
-      console.log(err);
+      console.log(err.message);
     }
   };
 
@@ -424,24 +461,10 @@ class FlareController {
     for (let addr in this.addrWhitelistInfo) {
       try {
         const vp = await this.wNatContract.methods.votePowerOf(addr).call();
-        this.votePowerList[addr] = vp;
+        this.votePowerList[addr] = vp.toString();
       } catch (err) {
-        console.log(addr, err, "getCurrentVotePowerList");
+        console.log(addr, err.message, "getCurrentVotePowerList");
       }
-    }
-  };
-
-  getPrevLockedVotePowerList = async () => {
-    try {
-      this.lockedBlock = await this.ftsoRewardManagerContract.methods
-        .getRewardEpochVotePowerBlock(Number(this.currentRewardEpochID) - 1)
-        .call();
-      for (let addr in this.addrWhitelistInfo) {
-        const locked_vp = await this.wNatContract.methods.votePowerOfAt(addr, Number(this.lockedBlock)).call();
-        this.lockedVotePowerList[addr] = locked_vp;
-      }
-    } catch (err) {
-      console.log(err, "getPrevLockedVotePowerList");
     }
   };
 
@@ -452,10 +475,24 @@ class FlareController {
         .call();
       for (let addr in this.addrWhitelistInfo) {
         const locked_vp = await this.wNatContract.methods.votePowerOfAt(addr, Number(this.lockedBlock)).call();
-        this.lockedVotePowerList[addr] = locked_vp;
+        this.lockedVotePowerList[addr] = locked_vp.toString();
       }
     } catch (err) {
-      console.log(err, "getLockedVotePowerList");
+      console.log(err.message, "getLockedVotePowerList");
+    }
+  };
+
+  getRewardRate = () => {
+    for (let addr in this.addrWhitelistInfo) {
+      try {
+        const totalRward = Number(this.web3.utils.fromWei(this.totalEpochRewardList[addr], "ether")).toFixed();
+        const curReward = Number(this.web3.utils.fromWei(this.currentEpochRewardList[addr], "ether")).toFixed();
+        const curVP = Number(this.web3.utils.fromWei(this.votePowerList[addr], "ether")).toFixed();
+
+        this.currentRewardRateList[addr] = Number(((Number(totalRward) - Number(curReward)) / Number(curVP)) * 100).toFixed(4);
+      } catch (err) {
+        console.log(err.message, addr);
+      }
     }
   };
 
@@ -465,11 +502,14 @@ class FlareController {
     );
 
     let providersInfo = [];
+    let id = 0;
     for (let addr in this.addrWhitelistInfo) {
+      id++;
       let found = false;
-      providersRawData.data.providers.forEach((provider) => {
-        if (String(provider.address).toLowerCase() == addr.toLowerCase() && provider.chainId == 14) {
+      providersRawData.data.providers.forEach((provider, index) => {
+        if (String(provider.address).toLowerCase() == addr.toLowerCase() && provider.chainId == 19) {
           providersInfo.push({
+            id: id,
             name: provider.name,
             desc: provider.description,
             url: provider.url,
@@ -483,11 +523,9 @@ class FlareController {
             availability: this.availabilityRate[addr]?.toString(),
             balance: this.balances[addr]?.toString(),
             currentEpochReward: this.currentEpochRewardList[addr]?.toString(),
+            curRewardRate: this.currentRewardRateList[addr]?.toString(),
             totalEpochReward: this.totalEpochRewardList[addr]?.toString(),
-            prevEpochInfo: {
-              epochReward: this.prevEpochRewardList[addr]?.toString(),
-              totalReward: this.prevTotalRewardList[addr]?.toString(),
-            },
+            prevRewardRate: this.prevRewardRateList[addr]?.toString(),
             fee: this.feeList[addr],
           });
           found = true;
@@ -496,6 +534,7 @@ class FlareController {
 
       if (!found) {
         providersInfo.push({
+          id: id,
           name: "",
           desc: "",
           url: "",
@@ -509,11 +548,9 @@ class FlareController {
           availability: this.availabilityRate[addr]?.toString(),
           balance: this.balances[addr]?.toString(),
           currentEpochReward: this.currentEpochRewardList[addr]?.toString(),
+          curRewardRate: this.currentRewardRateList[addr]?.toString(),
           totalEpochReward: this.totalEpochRewardList[addr]?.toString(),
-          prevEpochInfo: {
-            epochReward: this.prevEpochRewardList[addr]?.toString(),
-            totalReward: this.prevTotalRewardList[addr]?.toString(),
-          },
+          prevRewardRate: this.prevRewardRateList[addr]?.toString(),
           fee: this.feeList[addr],
         });
       }
@@ -562,7 +599,7 @@ class FlareController {
         ) => {
           try {
             if (contractWithSymbol.symbol == "FLR") {
-              console.log(`=====FLare Price finalized for ${contractWithSymbol.symbol} in epochId ${epochId}=====`);
+              console.log(`💲Flare Price finalized for ${contractWithSymbol.symbol} in epochId ${epochId} 💲`);
             }
             const conn = mongoose.createConnection(mongoDB);
             const dynamicAddrModel = conn.model(contractWithSymbol.symbol, addrSchema);
@@ -570,31 +607,35 @@ class FlareController {
             let addrData = {};
 
             for (let addr of Object.keys(this.addrWhitelistInfo)) {
-              const epochPriceOfAddr = await contractWithSymbol.web3Contract.methods
-                .getEpochPriceForVoter(Number(epochId), addr)
-                .call();
+              try {
+                const epochPriceOfAddr = await contractWithSymbol.web3Contract.methods
+                  .getEpochPriceForVoter(Number(epochId), addr)
+                  .call();
+                let result = 0;
+                let medianPrice = this.web3.utils.toWei(ethers.utils.formatEther(price), "ether");
+                let lowPrice = this.web3.utils.toWei(ethers.utils.formatEther(lowRewardPrice), "ether");
 
-              let result = 0;
-              let medianPrice = this.web3.utils.toWei(ethers.utils.formatEther(price), "ether");
-              let lowPrice = this.web3.utils.toWei(ethers.utils.formatEther(lowRewardPrice), "ether");
+                let highPrice = this.web3.utils.toWei(ethers.utils.formatEther(highRewardPrice), "ether");
 
-              let highPrice = this.web3.utils.toWei(ethers.utils.formatEther(highRewardPrice), "ether");
+                if (Number(lowPrice) < epochPriceOfAddr && epochPriceOfAddr < Number(highPrice)) {
+                  result = 1;
+                }
 
-              if (Number(lowPrice) < epochPriceOfAddr && epochPriceOfAddr < Number(highPrice)) {
-                result = 1;
+                if (Number(lowPrice) == epochPriceOfAddr || Number(highPrice) == epochPriceOfAddr) {
+                  result = 0.5;
+                }
+
+                addrData[addr] = {
+                  price: epochPriceOfAddr,
+                  medianPrice,
+                  lowPrice,
+                  highPrice,
+                  result,
+                };
+              } catch (err) {
+                console.log(err.message, "**** This provider's epoch data doesn't exist ****");
+                continue;
               }
-
-              if (Number(lowPrice) == epochPriceOfAddr || Number(highPrice) == epochPriceOfAddr) {
-                result = 0.5;
-              }
-
-              addrData[addr] = {
-                price: epochPriceOfAddr,
-                medianPrice,
-                lowPrice,
-                highPrice,
-                result,
-              };
             }
             const currentLength = await dynamicAddrModel.countDocuments();
 

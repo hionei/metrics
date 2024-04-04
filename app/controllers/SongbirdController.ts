@@ -3,17 +3,30 @@ import { getContract, getProvider, getWeb3, getWeb3Contract, bigNumberToMillis }
 import dotenv from "dotenv";
 import { currentUnixTime, weiToEther } from "../utils/helpers";
 import axios from "axios";
-import { RPC_URLS, SGB_SYMBOLS, GRAPHQL_URL } from "../config";
+import { RPC_URLS, SGB_SYMBOLS, GRAPHQL_URL, EXECUTOR_ADDRESS } from "../config";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
+import { PRIVATE_KEY } from "../config/secret";
 dotenv.config();
 const RPC_URL = RPC_URLS[0];
+const networkName = "Songbird";
 const Schema = mongoose.Schema;
 
 const addrSchema = new Schema({
   epochID: String,
   data: Object,
 });
+
+const autoClaimSchema = new Schema({
+  address: String,
+});
+
+const usersSchema = new Schema(
+  {
+    address: String,
+  },
+  { timestamps: true }
+);
 
 const prevSchema = new Schema({
   epochID: String,
@@ -70,11 +83,13 @@ class SongbirdController {
   ftsoRewardManagerContract!: any;
   wNatContract!: any;
   voterWhitelisterContract!: any;
+  CSMContract!: any;
   addrWhitelistInfo = {};
   flareProvidersInfo: ProviderInfo[] = [];
   songbirdProvidersInfo: ProviderInfo[] = [];
 
   currentRewardEpochID: number = 0;
+  tempRewardEpochId: number = 0;
   successRate: Object = {};
   availabilityRate: Object = {};
   votePowerList: Object = {};
@@ -82,6 +97,8 @@ class SongbirdController {
   currentEpochRewardList: Object = {};
   totalEpochRewardList: Object = {};
   delegatorsInfoList: Object = {};
+
+  ftsoRewardManagerAddress: String = "";
 
   currentRewardRateList: Object = {};
   prevRewardRateList: Object = {};
@@ -112,12 +129,12 @@ class SongbirdController {
         this.web3 = getWeb3(RPC_URL);
 
         if (this.web3) {
-          console.log("Web3 instance is created properly");
+          console.log(networkName, "Web3 instance is created properly");
         }
 
         const result = await this.web3.eth.net.isListening();
 
-        console.log("🎵 Web3 status", result);
+        console.log(networkName, "🎵 Web3 status", result);
 
         this.priceSubmitterWeb3Contract = await getWeb3Contract(
           this.web3,
@@ -129,7 +146,11 @@ class SongbirdController {
         this.ftsoManagerWeb3Contract = await getWeb3Contract(this.web3, ftsoManagerAddress, "FtsoManager");
 
         const ftsoRewardManagerAddress = await this.ftsoManagerWeb3Contract.methods.rewardManager().call();
+        this.ftsoRewardManagerAddress = ftsoRewardManagerAddress;
         this.ftsoRewardManagerContract = await getWeb3Contract(this.web3, ftsoRewardManagerAddress, "FtsoRewardManager");
+
+        const csmAddress = await this.ftsoRewardManagerContract.methods.claimSetupManager().call();
+        this.CSMContract = await getWeb3Contract(this.web3, csmAddress, "ClaimSetupManager");
 
         const wnatContractAddress = await this.ftsoRewardManagerContract.methods.wNat().call();
         this.wNatContract = await getWeb3Contract(this.web3, wnatContractAddress, "WNat");
@@ -139,66 +160,66 @@ class SongbirdController {
 
         await this.setupListener();
 
-        console.log("🍁 Got all contract instances and setup listener 🍁");
+        console.log(networkName, "🍁 Got all contract instances and setup listener 🍁");
+        await this.setupEndsIn();
+        console.log(networkName, "setupEndsIn");
 
         setTimeout(() => {
           const roundExecution = async () => {
             try {
-              console.log("🌼 Songbird Started getting initial info 🌼");
+              console.log(networkName, "🌼 Songbird Started getting initial info 🌼");
 
               await this.getWhitelistedAddresses();
-              console.log("1. got whitelisted addresses");
+              console.log(networkName, "1. got whitelisted addresses");
 
               await this.getEpochID();
-              console.log("2. got epoch id");
+
+              console.log(networkName, "2. got epoch id");
               this.initVariables();
-              console.log("3. init variables");
+              console.log(networkName, "3. init variables");
 
               this.getPrevEpochRewardRate();
-              console.log("4. getPrevEpochRewardRate");
-
-              await this.setupEndsIn();
-              console.log("5. setupEndsIn");
+              console.log(networkName, "4. getPrevEpochRewardRate");
 
               await this.setupDuration();
-              console.log("6. setupduration");
+              console.log(networkName, "6. setupduration");
 
               await this.getTotalVotePower();
-              console.log("7. getTotalVotePower");
+              console.log(networkName, "7. getTotalVotePower");
 
               await this.getSuccessRate();
-              console.log("8. getSuccessRate");
+              console.log(networkName, "8. getSuccessRate");
 
               await this.getCurrentVotePowerList();
-              console.log("9. getCurrentVotePowerList");
+              console.log(networkName, "9. getCurrentVotePowerList");
 
               await this.getLockedVotePowerList();
-              console.log("10. getLockedVotePowerList");
+              console.log(networkName, "10. getLockedVotePowerList");
 
               await this.getBalances();
-              console.log("11. getBalances");
+              console.log(networkName, "11. getBalances");
 
               await this.getCurrentEpochReward();
-              console.log("12. getCurrentEpochReward");
+              console.log(networkName, "12. getCurrentEpochReward");
 
               await this.getTotalEpochReward();
-              console.log("13. getTotalEpochReward");
+              console.log(networkName, "13. getTotalEpochReward");
 
               this.getRewardRate();
-              console.log("14. getRewardRate");
+              console.log(networkName, "14. getRewardRate");
 
               await this.savePrevData();
-              console.log("15. Saved Prev Data");
+              console.log(networkName, "15. Saved Prev Data");
 
               await this.getFee();
-              console.log("16. getFee");
+              console.log(networkName, "16. getFee");
 
               await this.getFTSOProvidersInfo();
-              console.log("👨‍🚀 ftso providers data is ready👨‍🚀");
+              console.log(networkName, "👨‍🚀 ftso providers data is ready👨‍🚀");
               roundExecution();
             } catch (err) {
               console.log(err.message);
-              console.log("🏹 👇restarting again 👇🏹");
+              console.log(networkName, "🏹 👇restarting again 👇🏹");
               await init();
             }
           };
@@ -206,7 +227,7 @@ class SongbirdController {
         }, 1000);
       } catch (err) {
         console.log(err.message);
-        console.log("🏹 restarting again 🏹");
+        console.log(networkName, "🏹 restarting again 🏹");
 
         await init();
       }
@@ -218,6 +239,90 @@ class SongbirdController {
     for (let addr in this.addrWhitelistInfo) {
       this.prevRewardRateList[addr] = 0;
       this.currentRewardRateList[addr] = 0;
+    }
+  };
+
+  enableAutoClaim = async (req: Request, res: Response) => {
+    const { address } = req.body;
+
+    try {
+      const conn = mongoose.createConnection(mongoDB);
+      const songbirdAutoClaimModel = conn.model("songbirdAutoclaimUsers", autoClaimSchema);
+
+      await songbirdAutoClaimModel.findOneAndUpdate({ address: address }, {}, { new: true, upsert: true });
+    } catch (err) {
+      console.log(err.message);
+    }
+  };
+
+  autoClaim = async () => {
+    try {
+      const conn = mongoose.createConnection(mongoDB);
+      const songbirdAutoClaimModel = conn.model("songbirdAutoclaimUsers", autoClaimSchema);
+
+      const users = await songbirdAutoClaimModel.find({});
+
+      let rightUsers = [];
+
+      for (let user of users) {
+        const isRight = await this.CSMContract.methods.isClaimExecutor(user.address, EXECUTOR_ADDRESS).call();
+        if (isRight) {
+          rightUsers.push(user.address);
+        } else {
+          await songbirdAutoClaimModel.deleteOne({ address: user.address });
+        }
+      }
+
+      let estimatedGas = await this.ftsoRewardManagerContract.methods
+        .autoClaim(rightUsers, Number(this.currentRewardEpochID) - 1)
+        .estimateGas({ from: EXECUTOR_ADDRESS, to: this.ftsoRewardManagerAddress });
+
+      const gasPrice = await this.web3.eth.getGasPrice();
+
+      const transaction = {
+        from: EXECUTOR_ADDRESS,
+        to: this.ftsoRewardManagerAddress,
+        gas: estimatedGas,
+        gasPrice: gasPrice,
+        data: await this.ftsoRewardManagerContract.methods
+          .autoClaim(rightUsers, Number(this.currentRewardEpochID) - 1)
+          .encodeABI(),
+      };
+
+      const signedTx = await this.web3.eth.accounts.signTransaction(transaction, PRIVATE_KEY);
+
+      let result = await this.web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+    } catch (err) {
+      console.log(err);
+    }
+  };
+
+  AddNewUser = async (req: Request, res: Response) => {
+    const { address } = req.body;
+
+    try {
+      const conn = mongoose.createConnection(mongoDB);
+      const usersModel = conn.model("users", usersSchema);
+
+      await usersModel.findOneAndUpdate({ address: address }, {}, { new: true, upsert: true });
+
+      return res.json("New User Added");
+    } catch (err) {
+      console.log(err.message);
+      return res.json("Adding new user failed");
+    }
+  };
+
+  removeAutoClaim = async (req: Request, res: Response) => {
+    const { address } = req.body;
+
+    try {
+      const conn = mongoose.createConnection(mongoDB);
+      const songbirdAutoClaimModel = conn.model("songbirdAutoclaimUsers", autoClaimSchema);
+
+      await songbirdAutoClaimModel.deleteOne({ address: address });
+    } catch (err) {
+      console.log(err.message);
     }
   };
 
@@ -405,29 +510,11 @@ class SongbirdController {
 
       const currentUnixTime = Math.floor(Date.now() / 1000);
       this.endsIn = Number(ends1) - currentUnixTime;
-      let stored = false;
 
       const interval = setInterval(async () => {
-        if (this.endsIn < 60) {
-          if (!stored) {
-            for (let addr in this.addrWhitelistInfo) {
-              try {
-                const curEpochRewardforPrev = await this.ftsoRewardManagerContract.methods
-                  .getStateOfRewards(addr, this.currentRewardEpochID)
-                  .call();
-                this.prevEpochRewardList[addr] = curEpochRewardforPrev[1];
-              } catch (err) {
-                console.log(addr, err.message);
-              }
-            }
-            stored = true;
-          }
-        }
-
-        if (this.endsIn < 0) {
+        if (this.endsIn <= 0) {
           clearInterval(interval);
           this.setupEndsIn();
-          this.savePrevData();
         }
         this.endsIn--;
       }, 1000);
@@ -439,6 +526,11 @@ class SongbirdController {
   getEpochID = async () => {
     try {
       this.currentRewardEpochID = await this.ftsoManagerWeb3Contract.methods.getCurrentRewardEpoch().call();
+      if (Number(this.currentRewardEpochID) == Number(this.tempRewardEpochId) + 1) {
+        await this.autoClaim();
+      } else {
+        this.tempRewardEpochId = this.currentRewardEpochID;
+      }
     } catch (err) {}
   };
 
