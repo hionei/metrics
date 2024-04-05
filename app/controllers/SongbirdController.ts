@@ -1,16 +1,21 @@
-import { Request, Response, query } from "express";
-import { getContract, getProvider, getWeb3, getWeb3Contract, bigNumberToMillis } from "../services/web3";
+import { Request, Response } from "express";
+import {
+  getContract,
+  getProvider,
+  getWeb3,
+  getWeb3Contract,
+} from "../services/web3";
 import dotenv from "dotenv";
-import { currentUnixTime, weiToEther } from "../utils/helpers";
 import axios from "axios";
-import { RPC_URLS, SGB_SYMBOLS, GRAPHQL_URL, EXECUTOR_ADDRESS } from "../config";
+import { RPC_URL, SGB_SYMBOLS, EXECUTOR_ADDRESS } from "../config";
 import mongoose from "mongoose";
 import { ethers } from "ethers";
 import { PRIVATE_KEY } from "../config/secret";
 dotenv.config();
-const RPC_URL = RPC_URLS[0];
+
 const networkName = "Songbird";
 const Schema = mongoose.Schema;
+const mongoDB = "mongodb://localhost:27017/songbirdData";
 
 const addrSchema = new Schema({
   epochID: String,
@@ -34,8 +39,6 @@ const prevSchema = new Schema({
   prevTotalReward: Object,
   votePower: Object,
 });
-
-const mongoDB = "mongodb://localhost:27017/songbirdData";
 
 // Compile model from schema
 
@@ -124,117 +127,143 @@ class SongbirdController {
   top10Reward: any = 0;
 
   constructor() {
-    const init = async () => {
+    this.init();
+  }
+
+  init = async () => {
+    try {
+      this.web3 = getWeb3(RPC_URL);
+
+      if (this.web3) {
+        console.log(networkName, "Web3 instance is created properly");
+      }
+
+      const result = await this.web3.eth.net.isListening();
+
+      console.log(networkName, "🎵 Web3 status", result);
+
+      await this.initContracts();
+
+      this.initVariables();
+
+      await this.setupListener();
+
+      console.log(
+        networkName,
+        "🍁 Got all contract instances and setup listener 🍁"
+      );
+
+      await this.setupEndsIn();
+      console.log(networkName, "setupEndsIn");
+
+      await this.roundExecution();
+    } catch (err) {
+      console.log(err.message);
+      console.log(networkName, "🏹 restarting again 🏹");
+    }
+  };
+
+  roundExecution = async () => {
+    while (true) {
       try {
-        this.web3 = getWeb3(RPC_URL);
+        console.log(networkName, "🌼 Songbird Started getting initial info 🌼");
 
-        if (this.web3) {
-          console.log(networkName, "Web3 instance is created properly");
-        }
+        await this.getWhitelistedAddresses();
 
-        const result = await this.web3.eth.net.isListening();
+        await this.getEpochID();
 
-        console.log(networkName, "🎵 Web3 status", result);
+        await this.getPrevEpochRewardRate();
 
-        this.priceSubmitterWeb3Contract = await getWeb3Contract(
-          this.web3,
-          process.env.SUBMITTER_CONTRACT_ADDRESS,
-          "PriceSubmitter"
-        );
+        await this.setupDuration();
 
-        let ftsoManagerAddress = await this.priceSubmitterWeb3Contract.methods.getFtsoManager().call();
-        this.ftsoManagerWeb3Contract = await getWeb3Contract(this.web3, ftsoManagerAddress, "FtsoManager");
+        await this.getTotalVotePower();
 
-        const ftsoRewardManagerAddress = await this.ftsoManagerWeb3Contract.methods.rewardManager().call();
-        this.ftsoRewardManagerAddress = ftsoRewardManagerAddress;
-        this.ftsoRewardManagerContract = await getWeb3Contract(this.web3, ftsoRewardManagerAddress, "FtsoRewardManager");
+        await this.getSuccessRate();
 
-        const csmAddress = await this.ftsoRewardManagerContract.methods.claimSetupManager().call();
-        this.CSMContract = await getWeb3Contract(this.web3, csmAddress, "ClaimSetupManager");
+        await this.getCurrentVotePowerList();
 
-        const wnatContractAddress = await this.ftsoRewardManagerContract.methods.wNat().call();
-        this.wNatContract = await getWeb3Contract(this.web3, wnatContractAddress, "WNat");
+        await this.getLockedVotePowerList();
 
-        const voterWhitelisterAddress = await this.priceSubmitterWeb3Contract.methods.getVoterWhitelister().call();
-        this.voterWhitelisterContract = await getWeb3Contract(this.web3, voterWhitelisterAddress, "VoterWhitelister");
+        await this.getBalances();
 
-        await this.setupListener();
+        await this.getCurrentEpochReward();
 
-        console.log(networkName, "🍁 Got all contract instances and setup listener 🍁");
-        await this.setupEndsIn();
-        console.log(networkName, "setupEndsIn");
+        await this.getTotalEpochReward();
 
-        setTimeout(() => {
-          const roundExecution = async () => {
-            try {
-              console.log(networkName, "🌼 Songbird Started getting initial info 🌼");
+        this.currentRewardRateList = await this.getRewardRate();
 
-              await this.getWhitelistedAddresses();
-              console.log(networkName, "1. got whitelisted addresses");
+        await this.savePrevData();
 
-              await this.getEpochID();
+        await this.getFee();
 
-              console.log(networkName, "2. got epoch id");
-              this.initVariables();
-              console.log(networkName, "3. init variables");
+        await this.getFTSOProvidersInfo();
 
-              this.getPrevEpochRewardRate();
-              console.log(networkName, "4. getPrevEpochRewardRate");
-
-              await this.setupDuration();
-              console.log(networkName, "6. setupduration");
-
-              await this.getTotalVotePower();
-              console.log(networkName, "7. getTotalVotePower");
-
-              await this.getSuccessRate();
-              console.log(networkName, "8. getSuccessRate");
-
-              await this.getCurrentVotePowerList();
-              console.log(networkName, "9. getCurrentVotePowerList");
-
-              await this.getLockedVotePowerList();
-              console.log(networkName, "10. getLockedVotePowerList");
-
-              await this.getBalances();
-              console.log(networkName, "11. getBalances");
-
-              await this.getCurrentEpochReward();
-              console.log(networkName, "12. getCurrentEpochReward");
-
-              await this.getTotalEpochReward();
-              console.log(networkName, "13. getTotalEpochReward");
-
-              this.getRewardRate();
-              console.log(networkName, "14. getRewardRate");
-
-              await this.savePrevData();
-              console.log(networkName, "15. Saved Prev Data");
-
-              await this.getFee();
-              console.log(networkName, "16. getFee");
-
-              await this.getFTSOProvidersInfo();
-              console.log(networkName, "👨‍🚀 ftso providers data is ready👨‍🚀");
-              roundExecution();
-            } catch (err) {
-              console.log(err.message);
-              console.log(networkName, "🏹 👇restarting again 👇🏹");
-              await init();
-            }
-          };
-          roundExecution();
-        }, 1000);
+        console.log("Completed the calcuation");
       } catch (err) {
         console.log(err.message);
-        console.log(networkName, "🏹 restarting again 🏹");
-
-        await init();
+        console.log(networkName, "🏹 👇restarting again 👇🏹");
       }
-    };
+    }
+  };
 
-    init();
-  }
+  initContracts = async () => {
+    try {
+      this.priceSubmitterWeb3Contract = await getWeb3Contract(
+        this.web3,
+        process.env.SUBMITTER_CONTRACT_ADDRESS,
+        "PriceSubmitter"
+      );
+
+      let ftsoManagerAddress = await this.priceSubmitterWeb3Contract.methods
+        .getFtsoManager()
+        .call();
+      this.ftsoManagerWeb3Contract = await getWeb3Contract(
+        this.web3,
+        ftsoManagerAddress,
+        "FtsoManager"
+      );
+
+      const ftsoRewardManagerAddress =
+        await this.ftsoManagerWeb3Contract.methods.rewardManager().call();
+      this.ftsoRewardManagerAddress = ftsoRewardManagerAddress;
+      this.ftsoRewardManagerContract = await getWeb3Contract(
+        this.web3,
+        ftsoRewardManagerAddress,
+        "FtsoRewardManager"
+      );
+
+      const csmAddress = await this.ftsoRewardManagerContract.methods
+        .claimSetupManager()
+        .call();
+      this.CSMContract = await getWeb3Contract(
+        this.web3,
+        csmAddress,
+        "ClaimSetupManager"
+      );
+
+      const wnatContractAddress = await this.ftsoRewardManagerContract.methods
+        .wNat()
+        .call();
+      this.wNatContract = await getWeb3Contract(
+        this.web3,
+        wnatContractAddress,
+        "WNat"
+      );
+
+      const voterWhitelisterAddress =
+        await this.priceSubmitterWeb3Contract.methods
+          .getVoterWhitelister()
+          .call();
+      this.voterWhitelisterContract = await getWeb3Contract(
+        this.web3,
+        voterWhitelisterAddress,
+        "VoterWhitelister"
+      );
+    } catch (err) {
+      console.log(err.message);
+    }
+  };
+
   initVariables = () => {
     for (let addr in this.addrWhitelistInfo) {
       this.prevRewardRateList[addr] = 0;
@@ -247,9 +276,16 @@ class SongbirdController {
 
     try {
       const conn = mongoose.createConnection(mongoDB);
-      const songbirdAutoClaimModel = conn.model("songbirdAutoclaimUsers", autoClaimSchema);
+      const songbirdAutoClaimModel = conn.model(
+        "songbirdAutoclaimUsers",
+        autoClaimSchema
+      );
 
-      await songbirdAutoClaimModel.findOneAndUpdate({ address: address }, {}, { new: true, upsert: true });
+      await songbirdAutoClaimModel.findOneAndUpdate(
+        { address: address },
+        {},
+        { new: true, upsert: true }
+      );
     } catch (err) {
       console.log(err.message);
     }
@@ -258,14 +294,19 @@ class SongbirdController {
   autoClaim = async () => {
     try {
       const conn = mongoose.createConnection(mongoDB);
-      const songbirdAutoClaimModel = conn.model("songbirdAutoclaimUsers", autoClaimSchema);
+      const songbirdAutoClaimModel = conn.model(
+        "songbirdAutoclaimUsers",
+        autoClaimSchema
+      );
 
       const users = await songbirdAutoClaimModel.find({});
 
       let rightUsers = [];
 
       for (let user of users) {
-        const isRight = await this.CSMContract.methods.isClaimExecutor(user.address, EXECUTOR_ADDRESS).call();
+        const isRight = await this.CSMContract.methods
+          .isClaimExecutor(user.address, EXECUTOR_ADDRESS)
+          .call();
         if (isRight) {
           rightUsers.push(user.address);
         } else {
@@ -275,7 +316,10 @@ class SongbirdController {
 
       let estimatedGas = await this.ftsoRewardManagerContract.methods
         .autoClaim(rightUsers, Number(this.currentRewardEpochID) - 1)
-        .estimateGas({ from: EXECUTOR_ADDRESS, to: this.ftsoRewardManagerAddress });
+        .estimateGas({
+          from: EXECUTOR_ADDRESS,
+          to: this.ftsoRewardManagerAddress,
+        });
 
       const gasPrice = await this.web3.eth.getGasPrice();
 
@@ -289,9 +333,14 @@ class SongbirdController {
           .encodeABI(),
       };
 
-      const signedTx = await this.web3.eth.accounts.signTransaction(transaction, PRIVATE_KEY);
+      const signedTx = await this.web3.eth.accounts.signTransaction(
+        transaction,
+        PRIVATE_KEY
+      );
 
-      let result = await this.web3.eth.sendSignedTransaction(signedTx.rawTransaction);
+      let result = await this.web3.eth.sendSignedTransaction(
+        signedTx.rawTransaction
+      );
     } catch (err) {
       console.log(err);
     }
@@ -304,7 +353,11 @@ class SongbirdController {
       const conn = mongoose.createConnection(mongoDB);
       const usersModel = conn.model("users", usersSchema);
 
-      await usersModel.findOneAndUpdate({ address: address }, {}, { new: true, upsert: true });
+      await usersModel.findOneAndUpdate(
+        { address: address },
+        {},
+        { new: true, upsert: true }
+      );
 
       return res.json("New User Added");
     } catch (err) {
@@ -318,7 +371,10 @@ class SongbirdController {
 
     try {
       const conn = mongoose.createConnection(mongoDB);
-      const songbirdAutoClaimModel = conn.model("songbirdAutoclaimUsers", autoClaimSchema);
+      const songbirdAutoClaimModel = conn.model(
+        "songbirdAutoclaimUsers",
+        autoClaimSchema
+      );
 
       await songbirdAutoClaimModel.deleteOne({ address: address });
     } catch (err) {
@@ -341,13 +397,18 @@ class SongbirdController {
   getFee = async () => {
     for (let addr in this.addrWhitelistInfo) {
       try {
-        const fee = await this.ftsoRewardManagerContract.methods.getDataProviderCurrentFeePercentage(addr).call();
+        const fee = await this.ftsoRewardManagerContract.methods
+          .getDataProviderCurrentFeePercentage(addr)
+          .call();
         const scheduledFee = await this.ftsoRewardManagerContract.methods
           .getDataProviderScheduledFeePercentageChanges(addr)
           .call();
         this.feeList[addr] = {
           fee: fee.toString(),
-          scheduledFee: { fee: scheduledFee[0].toString(), from: scheduledFee[1].toString() },
+          scheduledFee: {
+            fee: scheduledFee[0].toString(),
+            from: scheduledFee[1].toString(),
+          },
         };
       } catch (err) {
         console.log(addr, "getFee", err);
@@ -363,7 +424,9 @@ class SongbirdController {
         const curEpochReward = await this.ftsoRewardManagerContract.methods
           .getStateOfRewards(addr, this.currentRewardEpochID)
           .call();
-        this.currentEpochRewardList[addr] = curEpochReward[1][0] ? curEpochReward[1][0].toString() : "0";
+        this.currentEpochRewardList[addr] = curEpochReward[1][0]
+          ? curEpochReward[1][0].toString()
+          : "0";
       } catch (err) {
         this.currentEpochRewardList[addr] = "0";
         console.log(addr, err.message);
@@ -377,7 +440,9 @@ class SongbirdController {
         const totalEpochReward = await this.ftsoRewardManagerContract.methods
           .getDataProviderPerformanceInfo(this.currentRewardEpochID, addr)
           .call();
-        this.totalEpochRewardList[addr] = totalEpochReward[0] ? totalEpochReward[0].toString() : "0";
+        this.totalEpochRewardList[addr] = totalEpochReward[0]
+          ? totalEpochReward[0].toString()
+          : "0";
       } catch (err) {
         this.totalEpochRewardList[addr] = "0";
         console.log(addr, "getTotalEpochReward", err);
@@ -390,14 +455,24 @@ class SongbirdController {
       const conn = mongoose.createConnection(mongoDB);
       const prevModel = conn.model("prevData", prevSchema);
 
-      const prevData = await prevModel.find({ epochID: String(Number(this.currentRewardEpochID) - 1) });
+      const prevData = await prevModel.find({
+        epochID: String(Number(this.currentRewardEpochID) - 1),
+      });
       for (let addr in this.addrWhitelistInfo) {
-        const prevTotalReward = Number(this.web3.utils.fromWei(prevData[0].prevTotalReward[addr], "ether")).toFixed();
-        const prevEpochReward = Number(this.web3.utils.fromWei(prevData[0].prevEpochReward[addr], "ether")).toFixed();
-        const votePower = Number(this.web3.utils.fromWei(prevData[0].votePower[addr], "ether")).toFixed();
+        const prevTotalReward = Number(
+          this.web3.utils.fromWei(prevData[0].prevTotalReward[addr], "ether")
+        ).toFixed();
+        const prevEpochReward = Number(
+          this.web3.utils.fromWei(prevData[0].prevEpochReward[addr], "ether")
+        ).toFixed();
+        const votePower = Number(
+          this.web3.utils.fromWei(prevData[0].votePower[addr], "ether")
+        ).toFixed();
 
         this.prevRewardRateList[addr] = Number(
-          ((Number(prevTotalReward) - Number(prevEpochReward)) / Number(votePower)) * 100
+          ((Number(prevTotalReward) - Number(prevEpochReward)) /
+            Number(votePower)) *
+            100
         ).toFixed(4);
       }
     } catch (err) {
@@ -429,7 +504,9 @@ class SongbirdController {
   getWhitelistedAddresses = async () => {
     try {
       for (let symbol of SGB_SYMBOLS) {
-        const result = await this.voterWhitelisterContract.methods.getFtsoWhitelistedPriceProvidersBySymbol(symbol).call();
+        const result = await this.voterWhitelisterContract.methods
+          .getFtsoWhitelistedPriceProvidersBySymbol(symbol)
+          .call();
         result.forEach((addr) => {
           addr = String(addr).toLowerCase();
           if (!this.addrWhitelistInfo[addr]) {
@@ -477,7 +554,8 @@ class SongbirdController {
 
       for (let addr in this.addrWhitelistInfo) {
         symbolSuccessRate[addr][symbol] = (totalResult[addr] / 120) * 100;
-        symbolAvailableRate[addr][symbol] = (totalSumOfAvailable[addr] / 120) * 100;
+        symbolAvailableRate[addr][symbol] =
+          (totalSumOfAvailable[addr] / 120) * 100;
       }
     }
 
@@ -498,7 +576,9 @@ class SongbirdController {
 
   setupDuration = async () => {
     try {
-      this.duration = await this.ftsoManagerWeb3Contract.methods.rewardEpochDurationSeconds().call();
+      this.duration = await this.ftsoManagerWeb3Contract.methods
+        .rewardEpochDurationSeconds()
+        .call();
     } catch (err) {
       console.log(err.message);
     }
@@ -506,7 +586,9 @@ class SongbirdController {
 
   setupEndsIn = async () => {
     try {
-      const ends1 = await this.ftsoManagerWeb3Contract.methods.currentRewardEpochEnds().call();
+      const ends1 = await this.ftsoManagerWeb3Contract.methods
+        .currentRewardEpochEnds()
+        .call();
 
       const currentUnixTime = Math.floor(Date.now() / 1000);
       this.endsIn = Number(ends1) - currentUnixTime;
@@ -525,8 +607,13 @@ class SongbirdController {
 
   getEpochID = async () => {
     try {
-      this.currentRewardEpochID = await this.ftsoManagerWeb3Contract.methods.getCurrentRewardEpoch().call();
-      if (Number(this.currentRewardEpochID) == Number(this.tempRewardEpochId) + 1) {
+      this.currentRewardEpochID = await this.ftsoManagerWeb3Contract.methods
+        .getCurrentRewardEpoch()
+        .call();
+      if (
+        Number(this.currentRewardEpochID) ==
+        Number(this.tempRewardEpochId) + 1
+      ) {
         await this.autoClaim();
       } else {
         this.tempRewardEpochId = this.currentRewardEpochID;
@@ -560,7 +647,9 @@ class SongbirdController {
         .getRewardEpochVotePowerBlock(this.currentRewardEpochID)
         .call();
       for (let addr in this.addrWhitelistInfo) {
-        const locked_vp = await this.wNatContract.methods.votePowerOfAt(addr, Number(this.lockedBlock)).call();
+        const locked_vp = await this.wNatContract.methods
+          .votePowerOfAt(addr, Number(this.lockedBlock))
+          .call();
         this.lockedVotePowerList[addr] = locked_vp.toString();
       }
     } catch (err) {
@@ -568,17 +657,42 @@ class SongbirdController {
     }
   };
 
-  getRewardRate = () => {
-    for (let addr in this.addrWhitelistInfo) {
-      try {
-        const totalRward = Number(this.web3.utils.fromWei(this.totalEpochRewardList[addr], "ether")).toFixed();
-        const curReward = Number(this.web3.utils.fromWei(this.currentEpochRewardList[addr], "ether")).toFixed();
-        const curVP = Number(this.web3.utils.fromWei(this.votePowerList[addr], "ether")).toFixed();
+  getRewardRate = async () => {
+    try {
+      const promises = Object.keys(this.addrWhitelistInfo).map(async (addr) => {
+        try {
+          const totalReward = Number(
+            this.web3.utils.fromWei(this.totalEpochRewardList[addr], "ether")
+          );
+          const currentReward = Number(
+            this.web3.utils.fromWei(this.currentEpochRewardList[addr], "ether")
+          );
+          const votePower = Number(
+            this.web3.utils.fromWei(this.votePowerList[addr], "ether")
+          );
 
-        this.currentRewardRateList[addr] = Number(((Number(totalRward) - Number(curReward)) / Number(curVP)) * 100).toFixed(4);
-      } catch (err) {
-        console.log(err.message, addr);
-      }
+          if (isNaN(totalReward) || isNaN(currentReward) || isNaN(votePower)) {
+            throw new Error("Invalid values for reward calculation");
+          }
+
+          const rewardRate = ((totalReward - currentReward) / votePower) * 100;
+          return { addr, rewardRate: rewardRate.toFixed(4) };
+        } catch (err) {
+          console.log(err.message, addr);
+          return { addr, rewardRate: "N/A" }; // or handle error accordingly
+        }
+      });
+
+      const results = await Promise.all(promises);
+      const rewardRates = {};
+      results.forEach(({ addr, rewardRate }) => {
+        rewardRates[addr] = rewardRate;
+      });
+
+      return rewardRates;
+    } catch (err) {
+      console.log(err.message);
+      return {}; // or handle error accordingly
     }
   };
 
@@ -593,7 +707,10 @@ class SongbirdController {
       id++;
       let found = false;
       providersRawData.data.providers.forEach((provider, index) => {
-        if (String(provider.address).toLowerCase() == addr.toLowerCase() && provider.chainId == 19) {
+        if (
+          String(provider.address).toLowerCase() == addr.toLowerCase() &&
+          provider.chainId == 19
+        ) {
           providersInfo.push({
             id: id,
             name: provider.name,
@@ -685,29 +802,50 @@ class SongbirdController {
         ) => {
           try {
             if (contractWithSymbol.symbol == "SGB") {
-              console.log(`💲Songbird Price finalized for ${contractWithSymbol.symbol} in epochId ${epochId} 💲`);
+              console.log(
+                `💲Songbird Price finalized for ${contractWithSymbol.symbol} in epochId ${epochId} 💲`
+              );
             }
             const conn = mongoose.createConnection(mongoDB);
-            const dynamicAddrModel = conn.model(contractWithSymbol.symbol, addrSchema);
+            const dynamicAddrModel = conn.model(
+              contractWithSymbol.symbol,
+              addrSchema
+            );
 
             let addrData = {};
 
             for (let addr of Object.keys(this.addrWhitelistInfo)) {
               try {
-                const epochPriceOfAddr = await contractWithSymbol.web3Contract.methods
-                  .getEpochPriceForVoter(Number(epochId), addr)
-                  .call();
+                const epochPriceOfAddr =
+                  await contractWithSymbol.web3Contract.methods
+                    .getEpochPriceForVoter(Number(epochId), addr)
+                    .call();
                 let result = 0;
-                let medianPrice = this.web3.utils.toWei(ethers.utils.formatEther(price), "ether");
-                let lowPrice = this.web3.utils.toWei(ethers.utils.formatEther(lowRewardPrice), "ether");
+                let medianPrice = this.web3.utils.toWei(
+                  ethers.utils.formatEther(price),
+                  "ether"
+                );
+                let lowPrice = this.web3.utils.toWei(
+                  ethers.utils.formatEther(lowRewardPrice),
+                  "ether"
+                );
 
-                let highPrice = this.web3.utils.toWei(ethers.utils.formatEther(highRewardPrice), "ether");
+                let highPrice = this.web3.utils.toWei(
+                  ethers.utils.formatEther(highRewardPrice),
+                  "ether"
+                );
 
-                if (Number(lowPrice) < epochPriceOfAddr && epochPriceOfAddr < Number(highPrice)) {
+                if (
+                  Number(lowPrice) < epochPriceOfAddr &&
+                  epochPriceOfAddr < Number(highPrice)
+                ) {
                   result = 1;
                 }
 
-                if (Number(lowPrice) == epochPriceOfAddr || Number(highPrice) == epochPriceOfAddr) {
+                if (
+                  Number(lowPrice) == epochPriceOfAddr ||
+                  Number(highPrice) == epochPriceOfAddr
+                ) {
                   result = 0.5;
                 }
 
@@ -719,14 +857,20 @@ class SongbirdController {
                   result,
                 };
               } catch (err) {
-                console.log(err.message, "**** This provider's epoch data doesn't exist ****");
+                console.log(
+                  err.message,
+                  "**** This provider's epoch data doesn't exist ****"
+                );
                 continue;
               }
             }
             const currentLength = await dynamicAddrModel.countDocuments();
 
             if (currentLength > 119) {
-              await dynamicAddrModel.deleteMany({}, { sort: { _id: 1 }, limit: 1 });
+              await dynamicAddrModel.deleteMany(
+                {},
+                { sort: { _id: 1 }, limit: 1 }
+              );
             }
             const newEpochData = new dynamicAddrModel({
               epochID: epochId,
